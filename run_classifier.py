@@ -24,7 +24,7 @@ import os
 import modeling
 import optimization
 import tokenization
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 
 flags = tf.flags
 
@@ -49,6 +49,10 @@ flags.DEFINE_string("vocab_file", None,
 flags.DEFINE_string(
     "output_dir", None,
     "The output directory where the model checkpoints will be written.")
+
+flags.DEFINE_string(
+    "tracing_output_dir", None,
+    "The output directory where the tracing data will be written.")
 
 ## Other parameters
 
@@ -544,7 +548,7 @@ def file_based_input_fn_builder(input_file, seq_length, is_training,
       d = d.shuffle(buffer_size=100)
 
     d = d.apply(
-        tf.contrib.data.map_and_batch(
+        tf.data.experimental.map_and_batch_with_legacy_function(
             lambda record: _decode_record(record, name_to_features),
             batch_size=batch_size,
             drop_remainder=drop_remainder))
@@ -589,7 +593,7 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
   # instead.
   output_layer = model.get_pooled_output()
 
-  hidden_size = output_layer.shape[-1].value
+  hidden_size = output_layer.shape[-1]#.value
 
   output_weights = tf.get_variable(
       "output_weights", [num_labels, hidden_size],
@@ -674,7 +678,7 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
       train_op = optimization.create_optimizer(
           total_loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu)
 
-      output_spec = tf.contrib.tpu.TPUEstimatorSpec(
+      output_spec = tf.estimator.tpu.TPUEstimatorSpec(
           mode=mode,
           loss=total_loss,
           train_op=train_op,
@@ -693,13 +697,13 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
 
       eval_metrics = (metric_fn,
                       [per_example_loss, label_ids, logits, is_real_example])
-      output_spec = tf.contrib.tpu.TPUEstimatorSpec(
+      output_spec = tf.estimator.tpu.TPUEstimatorSpec(
           mode=mode,
           loss=total_loss,
           eval_metrics=eval_metrics,
           scaffold_fn=scaffold_fn)
     else:
-      output_spec = tf.contrib.tpu.TPUEstimatorSpec(
+      output_spec = tf.estimator.tpu.TPUEstimatorSpec(
           mode=mode,
           predictions={"probabilities": probabilities},
           scaffold_fn=scaffold_fn)
@@ -821,16 +825,16 @@ def main(_):
 
   tpu_cluster_resolver = None
   if FLAGS.use_tpu and FLAGS.tpu_name:
-    tpu_cluster_resolver = tf.contrib.cluster_resolver.TPUClusterResolver(
+    tpu_cluster_resolver = tf.distribute.cluster_resolver.TPUClusterResolver(
         FLAGS.tpu_name, zone=FLAGS.tpu_zone, project=FLAGS.gcp_project)
 
-  is_per_host = tf.contrib.tpu.InputPipelineConfig.PER_HOST_V2
-  run_config = tf.contrib.tpu.RunConfig(
+  is_per_host = tf.estimator.tpu.InputPipelineConfig.PER_HOST_V2
+  run_config = tf.estimator.tpu.RunConfig(
       cluster=tpu_cluster_resolver,
       master=FLAGS.master,
       model_dir=FLAGS.output_dir,
       save_checkpoints_steps=FLAGS.save_checkpoints_steps,
-      tpu_config=tf.contrib.tpu.TPUConfig(
+      tpu_config=tf.estimator.tpu.TPUConfig(
           iterations_per_loop=FLAGS.iterations_per_loop,
           num_shards=FLAGS.num_tpu_cores,
           per_host_input_for_training=is_per_host))
@@ -856,7 +860,11 @@ def main(_):
 
   # If TPU is not available, this will fall back to normal Estimator on CPU
   # or GPU.
-  estimator = tf.contrib.tpu.TPUEstimator(
+  tf.compat.v1.disable_eager_execution()
+  if not os.path.exists(FLAGS.tracing_output_dir):
+      os.makedirs(FLAGS.tracing_output_dir)
+  hook = tf.estimator.ProfilerHook(save_secs=1, output_dir=FLAGS.tracing_output_dir)
+  estimator = tf.estimator.tpu.TPUEstimator(
       use_tpu=FLAGS.use_tpu,
       model_fn=model_fn,
       config=run_config,
@@ -877,7 +885,8 @@ def main(_):
         seq_length=FLAGS.max_seq_length,
         is_training=True,
         drop_remainder=True)
-    estimator.train(input_fn=train_input_fn, max_steps=num_train_steps)
+
+    estimator.train(input_fn=train_input_fn, max_steps=num_train_steps, hooks=[hook])
 
   if FLAGS.do_eval:
     eval_examples = processor.get_dev_examples(FLAGS.data_dir)
